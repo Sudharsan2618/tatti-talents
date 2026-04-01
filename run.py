@@ -19,6 +19,7 @@ app.add_middleware(
         "http://localhost:5173",
         "http://localhost:3000",
         "http://127.0.0.1:5173",
+        "https://tourmaline-malasada-9c1bc9.netlify.app",
         os.getenv("FRONTEND_URL", "")
     ],
     allow_credentials=True,
