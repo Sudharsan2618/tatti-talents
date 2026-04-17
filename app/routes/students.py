@@ -22,18 +22,20 @@ def list_students(token: str = None, db: sqlite3.Connection = Depends(get_db)):
     if token:
         payload = decode_token(token)
         if payload:
-            if payload.get("sub") == "admin@tatti.in" or payload.get("role") == "admin":
+            role = (payload.get("role") or "").lower()
+            # Admins always have access
+            # HR has access only if their account is approved
+            is_admin = payload.get("sub") == "admin@tatti.in" or role == "admin"
+            is_approved_hr = role == "hr"
+            
+            if is_admin or is_approved_hr:
                 is_authorized = True
-            elif payload.get("role") == "hr":
-                # Check actual database for 'approved' status
-                hr = db.execute("SELECT approved FROM hr_users WHERE email=?", (payload["sub"],)).fetchone()
-                if hr and hr[0]: is_authorized = True
 
     rows = db.execute("""
         SELECT id, name, email, phone, college, degree, year, linkedin,
                availability, jobrole, city, tatti_course, stipend,
                status, domain, ptitle, pdesc, impact, skills,
-               github, demo, video, resume_path, has_resume, tatti_certified, is_new, submitted_at
+               github, demo, video, resume_path, tatti_certified, is_new, submitted_at
         FROM students
         WHERE ptitle IS NOT NULL AND ptitle != ''
           AND pdesc IS NOT NULL AND pdesc != ''
@@ -48,21 +50,30 @@ def list_students(token: str = None, db: sqlite3.Connection = Depends(get_db)):
         d["tatti_certified"] = bool(d["tatti_certified"])
         d["is_new"] = bool(d["is_new"])
         # has_resume: true if dedicated column set OR resume uploaded OR drive link present
-        d["has_resume"] = bool(d.get("has_resume") or d.get("resume_path") or d.get("github"))
+        d["has_resume"] = bool(d.get("resume_path") or d.get("github"))
         
-        # Redact contact details for non-authorized users
+        # Privacy Redaction: Hide contact details and links if guest or student
         if not is_authorized:
             for field in ["email", "phone", "linkedin", "github", "demo", "video", "resume_path"]:
                 d[field] = None
-            # Keep has_resume as boolean signal (don't expose the link)
-            # has_resume stays True so filters still work meaningfully
 
         students.append(d)
     return {"students": students, "total": len(students)}
 
 
 @router.get("/{student_id}")
-def get_student(student_id: int, db: sqlite3.Connection = Depends(get_db)):
+def get_student(student_id: int, token: str = None, db: sqlite3.Connection = Depends(get_db)):
+    # Authorization logic (consistent with list_students)
+    is_authorized = False
+    if token:
+        payload = decode_token(token)
+        if payload:
+            role = (payload.get("role") or "").lower()
+            is_admin = payload.get("sub") == "admin@tatti.in" or role == "admin"
+            is_approved_hr = role == "hr"
+            if is_admin or is_approved_hr:
+                is_authorized = True
+
     row = db.execute("SELECT * FROM students WHERE id = ?", (student_id,)).fetchone()
     if not row:
         raise HTTPException(404, "Student not found.")
@@ -71,6 +82,12 @@ def get_student(student_id: int, db: sqlite3.Connection = Depends(get_db)):
     d["tatti_certified"] = bool(d["tatti_certified"])
     d["is_new"] = bool(d["is_new"])
     d["has_resume"] = bool(d["resume_path"])
+    
+    # Redact if not authorized
+    if not is_authorized:
+        for field in ["email", "phone", "linkedin", "github", "demo", "video", "resume_path"]:
+            d[field] = None
+
     return d
 
 
@@ -182,3 +199,45 @@ def get_my_projects(token: str, db: sqlite3.Connection = Depends(get_db)):
         d["is_new"] = bool(d["is_new"])
         projects.append(d)
     return {"projects": projects}
+
+
+class StudentUpdate(BaseModel):
+    token: str
+    phone: Optional[str] = None
+    city: Optional[str] = None
+    linkedin: Optional[str] = None
+    github: Optional[str] = None
+    portfolio_url: Optional[str] = None
+    skills: Optional[list[str]] = None
+    experience: Optional[str] = None
+
+@router.post("/update-profile")
+def update_student_profile(data: StudentUpdate, db: sqlite3.Connection = Depends(get_db)):
+    payload = decode_token(data.token)
+    if not payload:
+        raise HTTPException(401, "Unauthorized")
+    
+    email = payload.get("sub")
+    
+    # Update all student records associated with this email (if they have multiple projects)
+    # or just the latest/master profile. Assuming we update all for consistency.
+    db.execute("""
+        UPDATE students SET 
+            phone = COALESCE(?, phone),
+            city = COALESCE(?, city),
+            linkedin = COALESCE(?, linkedin),
+            github = COALESCE(?, github),
+            portfolio_url = COALESCE(?, portfolio_url),
+            skills = COALESCE(?, skills),
+            experience = COALESCE(?, experience)
+        WHERE email = ?
+    """, (
+        data.phone, data.city, data.linkedin, data.github, 
+        data.portfolio_url, 
+        json.dumps(data.skills) if data.skills is not None else None,
+        data.experience,
+        email
+    ))
+    db.commit()
+    return {"message": "Profile updated successfully"}
+

@@ -37,11 +37,12 @@ class UpdateNote(BaseModel):
 def get_shortlist(token: str, db: sqlite3.Connection = Depends(get_db)):
     payload = _require_hr(token)
     hr_email = payload["sub"]
+    
     rows = db.execute("""
         SELECT sl.student_id, sl.stage, sl.note, sl.created_at,
                s.name, s.email, s.phone, s.college, s.degree, s.year,
                s.domain, s.ptitle, s.pdesc, s.impact, s.skills,
-               s.github, s.demo, s.status, s.tatti_certified
+               s.github, s.demo, s.video, s.resume_path, s.status, s.tatti_certified
         FROM shortlist sl
         JOIN students s ON sl.student_id = s.id
         WHERE sl.hr_email = ?
