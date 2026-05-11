@@ -25,8 +25,14 @@ def list_students(token: str = None, db: sqlite3.Connection = Depends(get_db)):
             role = (payload.get("role") or "").lower()
             # Admins always have access
             # HR has access only if their account is approved
-            is_admin = payload.get("sub") == "admin@tatti.in" or role == "admin"
-            is_approved_hr = role == "hr"
+            email = payload.get("sub")
+            is_admin = email == "admin@tatti.in" or role == "admin"
+            
+            is_approved_hr = False
+            if role == "hr":
+                res = db.execute("SELECT approved FROM hr_users WHERE email=?", (email,)).fetchone()
+                if res and res[0]:
+                    is_approved_hr = True
             
             if is_admin or is_approved_hr:
                 is_authorized = True
@@ -39,7 +45,8 @@ def list_students(token: str = None, db: sqlite3.Connection = Depends(get_db)):
         FROM students
         WHERE ptitle IS NOT NULL AND ptitle != ''
           AND pdesc IS NOT NULL AND pdesc != ''
-          AND demo IS NOT NULL AND demo != ''
+          AND LOWER(ptitle) != 'my profile'
+          AND LOWER(pdesc) != 'welcome to your professional profile. add your projects and skills to get noticed!'
         ORDER BY submitted_at DESC
     """).fetchall()
 
@@ -61,18 +68,55 @@ def list_students(token: str = None, db: sqlite3.Connection = Depends(get_db)):
     return {"students": students, "total": len(students)}
 
 
+@router.get("/me")
+def get_my_profile(token: str, db: sqlite3.Connection = Depends(get_db)):
+    payload = decode_token(token)
+    if not payload:
+        raise HTTPException(401, "Unauthorized")
+    
+    user_id = payload.get("uid")
+    row = db.execute("SELECT * FROM students WHERE user_id = ? ORDER BY submitted_at DESC LIMIT 1", (user_id,)).fetchone()
+    
+    if not row:
+        db.execute("""
+            INSERT INTO students (user_id, name, email, ptitle, pdesc, demo)
+            VALUES (?, ?, ?, 'My Profile', 'Welcome to your professional profile. Add your projects and skills to get noticed!', '')
+        """, (user_id, payload.get("name"), payload.get("sub")))
+        db.commit()
+        try:
+            db.execute("""
+                INSERT INTO notifications (user_id, title, message, type)
+                VALUES (?, 'Welcome to TalentAtlas!', 'Your profile has been initialized. Start exploring jobs and completing your profile.', 'info')
+            """, (user_id,))
+            db.commit()
+        except Exception:
+            pass  # Non-critical — don't let this block login
+        row = db.execute("SELECT * FROM students WHERE user_id = ?", (user_id,)).fetchone()
+
+
+    d = dict(row)
+    d["skills"] = json.loads(d["skills"]) if d["skills"] else []
+    d["tatti_certified"] = bool(d["tatti_certified"])
+    d["is_new"] = bool(d["is_new"])
+    d["has_resume"] = bool(d["resume_path"])
+    return d
+
+
 @router.get("/{student_id}")
 def get_student(student_id: int, token: str = None, db: sqlite3.Connection = Depends(get_db)):
-    # Authorization logic (consistent with list_students)
+    # Authorization logic
     is_authorized = False
     if token:
         payload = decode_token(token)
         if payload:
             role = (payload.get("role") or "").lower()
-            is_admin = payload.get("sub") == "admin@tatti.in" or role == "admin"
-            is_approved_hr = role == "hr"
-            if is_admin or is_approved_hr:
-                is_authorized = True
+            email = payload.get("sub")
+            is_admin = email == "admin@tatti.in" or role == "admin"
+            is_approved_hr = False
+            if role == "hr":
+                res = db.execute("SELECT approved FROM hr_users WHERE email=?", (email,)).fetchone()
+                if res and res[0]: is_approved_hr = True
+            if is_admin or is_approved_hr: is_authorized = True
 
     row = db.execute("SELECT * FROM students WHERE id = ?", (student_id,)).fetchone()
     if not row:
@@ -83,11 +127,9 @@ def get_student(student_id: int, token: str = None, db: sqlite3.Connection = Dep
     d["is_new"] = bool(d["is_new"])
     d["has_resume"] = bool(d["resume_path"])
     
-    # Redact if not authorized
     if not is_authorized:
         for field in ["email", "phone", "linkedin", "github", "demo", "video", "resume_path"]:
             d[field] = None
-
     return d
 
 
@@ -141,25 +183,36 @@ def submit_project(data: ProjectSubmit, db: sqlite3.Connection = Depends(get_db)
     return {"id": cur.lastrowid, "message": "Project published successfully!"}
 
 
-@router.post("/{student_id}/resume")
-async def upload_resume(student_id: int, file: UploadFile = File(...), token: str = Form(...),
+@router.post("/me/resume")
+async def upload_resume(file: UploadFile = File(...), token: str = Form(...),
                         db: sqlite3.Connection = Depends(get_db)):
     payload = decode_token(token)
     if not payload:
         raise HTTPException(401, "Unauthorized")
-
-    student = db.execute("SELECT id FROM students WHERE id = ?", (student_id,)).fetchone()
+    
+    user_id = payload.get("uid")
+    
+    # Try to find an existing student profile for this user
+    student = db.execute("SELECT id FROM students WHERE user_id = ? ORDER BY submitted_at DESC LIMIT 1", (user_id,)).fetchone()
+    
     if not student:
-        raise HTTPException(404, "Student not found")
+        # Create a stub profile if none exists
+        db.execute("""
+            INSERT INTO students (user_id, name, email, ptitle, pdesc, demo)
+            VALUES (?, ?, ?, 'Profile', 'Personal profile', '')
+        """, (user_id, payload.get("name"), payload.get("sub")))
+        db.commit()
+        student = db.execute("SELECT id FROM students WHERE user_id = ?", (user_id,)).fetchone()
 
+    actual_student_id = student["id"]
     ext = os.path.splitext(file.filename)[1]
-    filename = f"resume_{student_id}{ext}"
+    filename = f"resume_{actual_student_id}{ext}"
     path = UPLOAD_DIR / filename
 
     with open(str(path), "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    db.execute("UPDATE students SET resume_path = ? WHERE id = ?", (filename, student_id))
+    db.execute("UPDATE students SET resume_path = ? WHERE user_id = ?", (filename, user_id))
     db.commit()
     return {"message": "Resume uploaded", "filename": filename}
 

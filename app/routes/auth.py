@@ -67,7 +67,7 @@ def login_student(data: StudentLogin, db: sqlite3.Connection = Depends(get_db)):
     if not verify_password(data.password, user["password"]):
         raise HTTPException(401, "Incorrect password.")
     token = create_token({"sub": user["email"], "role": user["role"], "name": user["name"], "uid": user["id"]})
-    return {"token": token, "name": user["name"], "email": user["email"], "role": user["role"]}
+    return {"token": token, "name": user["name"], "email": user["email"], "role": user["role"], "uid": user["id"]}
 
 
 # ── HR Auth ──
@@ -79,20 +79,22 @@ def register_hr(data: HRRegister, db: sqlite3.Connection = Depends(get_db)):
     if len(data.password) < 6:
         raise HTTPException(400, "Password must be at least 6 characters.")
     
-    db.execute("""
+    cur = db.execute("""
         INSERT INTO hr_users (name, email, password, company, designation, intent, requirements, approved)
         VALUES (?, ?, ?, ?, ?, ?, ?, 0)
     """, (data.name, data.email, hash_password(data.password), data.company, data.designation, data.intent, data.requirements))
     db.commit()
 
+    uid = cur.lastrowid
+
     token = create_token({
         "sub": data.email, "role": "hr", "name": data.name,
-        "company": data.company, "approved": 0
+        "company": data.company, "uid": uid, "approved": False
     })
     
     return {
         "token": token, "email": data.email, "name": data.name, "role": "hr",
-        "company": data.company, "approved": False
+        "company": data.company, "uid": uid, "approved": False
     }
 
 
@@ -109,7 +111,7 @@ def login_hr(data: HRLogin, db: sqlite3.Connection = Depends(get_db)):
     })
     return {
         "token": token, "email": user["email"], "name": user["name"], "role": "hr",
-        "company": user["company"], "approved": bool(user["approved"])
+        "company": user["company"], "approved": bool(user["approved"]), "uid": user["id"]
     }
 
 
@@ -128,5 +130,5 @@ def get_me(token: str, db: sqlite3.Connection = Depends(get_db)):
     return {
         "email": payload.get("sub"), "name": payload.get("name"), 
         "role": payload.get("role"), "company": payload.get("company", ""),
-        "approved": approved
+        "approved": approved, "uid": payload.get("uid")
     }

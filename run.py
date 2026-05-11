@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from app.database import init_db, UPLOAD_DIR
-from app.routes import auth, students, hr, admin
+from app.routes import auth, students, hr, admin, jobs
 
 app = FastAPI(title="TalentAtlas API", version="1.0.0")
 
@@ -37,8 +37,10 @@ app.include_router(auth.router)
 app.include_router(students.router)
 app.include_router(hr.router)
 app.include_router(admin.router)
-from app.routes import challenges
+from app.routes import challenges, notifications
 app.include_router(challenges.router)
+app.include_router(notifications.router)
+app.include_router(jobs.router)
 
 
 @app.get("/")
@@ -49,9 +51,9 @@ def root():
 @app.on_event("startup")
 def startup():
     init_db()
-    print("✅ Database initialized.")
+    print("Database initialized.")
 
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run("run:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run("run:app", host="0.0.0.0", port=port, reload=True)

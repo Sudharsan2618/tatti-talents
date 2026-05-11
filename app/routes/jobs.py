@@ -65,6 +65,32 @@ def apply_to_job(data: ApplyJob, db: sqlite3.Connection = Depends(get_db)):
         INSERT INTO job_applications (job_id, student_id, cover_letter)
         VALUES (?, ?, ?)
     """, (data.job_id, user_id, data.cover_letter))
+
+    # Also add to HR's shortlist for the pipeline view
+    # 1. Get HR info
+    hr_info = db.execute("""
+        SELECT h.email FROM hr_users h
+        JOIN jobs j ON h.id = j.hr_id
+        WHERE j.id = ?
+    """, (data.job_id,)).fetchone()
+    
+    if hr_info:
+        hr_email = hr_info["email"]
+        # 2. Get the student profile ID (find the most recent one for this user)
+        student_profile = db.execute("""
+            SELECT id FROM students WHERE user_id = ? ORDER BY submitted_at DESC LIMIT 1
+        """, (user_id,)).fetchone()
+        
+        if student_profile:
+            student_id = student_profile["id"]
+            # 3. Insert or Update shortlist
+            existing_sl = db.execute("SELECT id FROM shortlist WHERE hr_email = ? AND student_id = ?", (hr_email, student_id)).fetchone()
+            if not existing_sl:
+                db.execute("""
+                    INSERT INTO shortlist (hr_email, student_id, stage, note)
+                    VALUES (?, ?, 'applied', ?)
+                """, (hr_email, student_id, f"Applied for Job #{data.job_id}: {data.cover_letter[:100]}..."))
+    
     db.commit()
     
     return {"message": "Application submitted successfully!"}
@@ -102,8 +128,21 @@ def get_bookmarks(token: str, db: sqlite3.Connection = Depends(get_db)):
 @router.post("/")
 def create_job(data: JobCreate, token: str, db: sqlite3.Connection = Depends(get_db)):
     payload = decode_token(token)
-    if not payload or payload.get("role") != "hr":
-        raise HTTPException(401, "Only HR can post jobs")
+    if not payload:
+        raise HTTPException(401, "Invalid token")
+    
+    role = (payload.get("role") or "").lower()
+    email = payload.get("sub")
+    is_admin = email == "admin@tatti.in" or role == "admin"
+    
+    is_approved_hr = False
+    if role == "hr":
+        res = db.execute("SELECT approved FROM hr_users WHERE email=?", (email,)).fetchone()
+        if res and res[0]:
+            is_approved_hr = True
+    
+    if not (is_admin or is_approved_hr):
+        raise HTTPException(403, "Only approved HR accounts can post jobs")
     
     hr_id = payload.get("uid")
     db.execute("""
@@ -111,14 +150,37 @@ def create_job(data: JobCreate, token: str, db: sqlite3.Connection = Depends(get
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (hr_id, data.title, data.company, data.location, data.salary, data.type, 
           data.description, json.dumps(data.requirements), json.dumps(data.skills_needed)))
+    
+    # Create notifications for all students
+    job_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    students = db.execute("SELECT id FROM users WHERE role = 'student'").fetchall()
+    for student in students:
+        db.execute("""
+            INSERT INTO notifications (user_id, title, message, type)
+            VALUES (?, ?, ?, 'job')
+        """, (student['id'], "New Job Posted", f"{data.company} just posted a new job: {data.title}"))
+    
     db.commit()
     return {"message": "Job posted successfully!"}
 
 @router.get("/hr/my")
 def get_hr_jobs(token: str, db: sqlite3.Connection = Depends(get_db)):
     payload = decode_token(token)
-    if not payload or payload.get("role") != "hr":
-        raise HTTPException(401, "Unauthorized")
+    if not payload:
+        raise HTTPException(401, "Invalid token")
+    
+    role = (payload.get("role") or "").lower()
+    email = payload.get("sub")
+    is_admin = email == "admin@tatti.in" or role == "admin"
+    
+    is_approved_hr = False
+    if role == "hr":
+        res = db.execute("SELECT approved FROM hr_users WHERE email=?", (email,)).fetchone()
+        if res and res[0]:
+            is_approved_hr = True
+    
+    if not (is_admin or is_approved_hr):
+        raise HTTPException(403, "Only approved HR accounts can view their jobs")
     
     hr_id = payload.get("uid")
     rows = db.execute("SELECT * FROM jobs WHERE hr_id = ? ORDER BY created_at DESC", (hr_id,)).fetchall()
@@ -127,8 +189,21 @@ def get_hr_jobs(token: str, db: sqlite3.Connection = Depends(get_db)):
 @router.delete("/{job_id}")
 def delete_job(job_id: int, token: str, db: sqlite3.Connection = Depends(get_db)):
     payload = decode_token(token)
-    if not payload or payload.get("role") != "hr":
-        raise HTTPException(401, "Unauthorized")
+    if not payload:
+        raise HTTPException(401, "Invalid token")
+    
+    role = (payload.get("role") or "").lower()
+    email = payload.get("sub")
+    is_admin = email == "admin@tatti.in" or role == "admin"
+    
+    is_approved_hr = False
+    if role == "hr":
+        res = db.execute("SELECT approved FROM hr_users WHERE email=?", (email,)).fetchone()
+        if res and res[0]:
+            is_approved_hr = True
+    
+    if not (is_admin or is_approved_hr):
+        raise HTTPException(403, "Unauthorized")
     
     hr_id = payload.get("uid")
     # Verify ownership

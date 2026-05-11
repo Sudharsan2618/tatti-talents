@@ -11,10 +11,23 @@ from app.utils import decode_token
 router = APIRouter(prefix="/api/hr", tags=["hr"])
 
 
-def _require_hr(token: str):
+def _require_hr(token: str, db: sqlite3.Connection):
     payload = decode_token(token)
-    if not payload or payload.get("role") not in ("hr", "admin"):
-        raise HTTPException(401, "HR login required.")
+    if not payload:
+        raise HTTPException(401, "Invalid or expired token.")
+    
+    role = (payload.get("role") or "").lower()
+    email = payload.get("sub")
+    is_admin = email == "admin@tatti.in" or role == "admin"
+    
+    is_approved_hr = False
+    if role == "hr":
+        res = db.execute("SELECT approved FROM hr_users WHERE email=?", (email,)).fetchone()
+        if res and res[0]:
+            is_approved_hr = True
+    
+    if not (is_admin or is_approved_hr):
+        raise HTTPException(403, "Your HR account is pending approval by the admin.")
     return payload
 
 
@@ -35,7 +48,7 @@ class UpdateNote(BaseModel):
 
 @router.get("/shortlist")
 def get_shortlist(token: str, db: sqlite3.Connection = Depends(get_db)):
-    payload = _require_hr(token)
+    payload = _require_hr(token, db)
     hr_email = payload["sub"]
     
     rows = db.execute("""
@@ -60,7 +73,7 @@ def get_shortlist(token: str, db: sqlite3.Connection = Depends(get_db)):
 
 @router.post("/shortlist/add")
 def add_to_shortlist(data: ShortlistAction, db: sqlite3.Connection = Depends(get_db)):
-    payload = _require_hr(data.token)
+    payload = _require_hr(data.token, db)
     hr_email = payload["sub"]
 
     existing = db.execute(
@@ -80,7 +93,7 @@ def add_to_shortlist(data: ShortlistAction, db: sqlite3.Connection = Depends(get
 
 @router.post("/shortlist/remove")
 def remove_from_shortlist(data: ShortlistAction, db: sqlite3.Connection = Depends(get_db)):
-    payload = _require_hr(data.token)
+    payload = _require_hr(data.token, db)
     hr_email = payload["sub"]
     db.execute(
         "DELETE FROM shortlist WHERE hr_email = ? AND student_id = ?",
@@ -92,7 +105,7 @@ def remove_from_shortlist(data: ShortlistAction, db: sqlite3.Connection = Depend
 
 @router.post("/pipeline/stage")
 def update_stage(data: UpdateStage, db: sqlite3.Connection = Depends(get_db)):
-    payload = _require_hr(data.token)
+    payload = _require_hr(data.token, db)
     hr_email = payload["sub"]
 
     existing = db.execute(
@@ -110,13 +123,29 @@ def update_stage(data: UpdateStage, db: sqlite3.Connection = Depends(get_db)):
             "INSERT INTO shortlist (hr_email, student_id, stage) VALUES (?, ?, ?)",
             (hr_email, data.student_id, data.stage)
         )
+    
+    # Sync with job_applications table
+    student_info = db.execute("SELECT user_id FROM students WHERE id = ?", (data.student_id,)).fetchone()
+    if student_info:
+        user_id = student_info["user_id"]
+        # Find the HR's ID
+        hr_row = db.execute("SELECT id FROM hr_users WHERE email = ?", (hr_email,)).fetchone()
+        if hr_row:
+            hr_id = hr_row["id"]
+            # Update the most recent application for this HR's jobs
+            db.execute("""
+                UPDATE job_applications 
+                SET status = ? 
+                WHERE student_id = ? AND job_id IN (SELECT id FROM jobs WHERE hr_id = ?)
+            """, (data.stage, user_id, hr_id))
+
     db.commit()
     return {"message": f"Stage updated to {data.stage}"}
 
 
 @router.post("/pipeline/note")
 def update_note(data: UpdateNote, db: sqlite3.Connection = Depends(get_db)):
-    payload = _require_hr(data.token)
+    payload = _require_hr(data.token, db)
     hr_email = payload["sub"]
 
     existing = db.execute(
@@ -140,7 +169,7 @@ def update_note(data: UpdateNote, db: sqlite3.Connection = Depends(get_db)):
 
 @router.get("/stats")
 def get_stats(token: str, db: sqlite3.Connection = Depends(get_db)):
-    payload = _require_hr(token)
+    payload = _require_hr(token, db)
     hr_email = payload["sub"]
 
     total = db.execute("SELECT COUNT(*) FROM students").fetchone()[0]
@@ -155,7 +184,7 @@ def get_stats(token: str, db: sqlite3.Connection = Depends(get_db)):
 
     # Pipeline breakdown
     pipeline = {}
-    for stage in ["new", "shortlisted", "contacted", "interview", "offer", "rejected"]:
+    for stage in ["applied", "new", "shortlisted", "contacted", "interview", "offer", "rejected"]:
         pipeline[stage] = db.execute(
             "SELECT COUNT(*) FROM shortlist WHERE hr_email = ? AND stage = ?",
             (hr_email, stage)
